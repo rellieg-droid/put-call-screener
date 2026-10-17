@@ -32,7 +32,8 @@ SHEET_COLUMNS = [
 ]
 # עמודות נוספות, אופציונליות, אחרי עמודות הגיליון
 EXTRA_COLUMNS = [
-    "Distance_Percent", "xEM", "BreakEven", "Commitment_USD", "Spread_Percent",
+    "Distance_Percent", "xEM", "BreakEven", "OTM_Probability_Percent", "Commitment_USD",
+    "Spread_Percent",
     "CumExposure_Percent", "NotChecked",
 ]
 COLUMNS = SHEET_COLUMNS + EXTRA_COLUMNS
@@ -65,7 +66,8 @@ def screen_chain(ticker: str, side: str, price: float, expiry: str, chain: list,
                  delta_fn, xem_fn, contracts: int = 1, settled_cash: float = 0.0,
                  alloc_limit: float | None = None, open_commitment: float = 0.0,
                  earnings_date: date | None = None, earnings_known: bool = False,
-                 r: float = 0.045, today: date | None = None, span: float = 0.5) -> list[dict]:
+                 r: float = 0.045, today: date | None = None, span: float = 0.5,
+                 prob_fn=None) -> list[dict]:
     """
     כל חוזה OTM בטווח (PUT: [(1-span)*price, price]; CALL: [price, (1+span)*price])
     -> שורה עם נתונים גולמיים + תוצאת כל כלל.
@@ -102,6 +104,12 @@ def screen_chain(ticker: str, side: str, price: float, expiry: str, chain: list,
                 xem = xem_fn(side, price, k, sigma, dte)
             except Exception:
                 xem = None
+        prob = None
+        if prob_fn is not None and iv and iv > 0:
+            try:
+                prob = prob_fn(side, price, k, T, iv, r)
+            except Exception:
+                prob = None
         mid = live_mid(c.get("bid"), c.get("ask"))
         if side == "PUT":
             commitment = k * MULT * contracts
@@ -119,6 +127,7 @@ def screen_chain(ticker: str, side: str, price: float, expiry: str, chain: list,
             "delta_abs": None if delta is None else abs(float(delta)),
             "delta_signed": None if delta is None else float(delta),
             "xem": None if xem is None else float(xem),
+            "prob_otm": None if prob is None else float(prob),
             "mid": mid,
             "spread_pct": None if mid is None else (c["ask"] - c["bid"]) / mid * 100.0,
             "breakeven": breakeven,
@@ -174,6 +183,8 @@ def contract_row(srow: dict, chain_by_strike: dict, r: float, off_hours) -> dict
         "Distance_Percent": _r(srow["dist_pct"], 1),
         "xEM": _r(srow["xem"], 2),
         "BreakEven": _r(srow["breakeven"], 2),
+        "OTM_Probability_Percent": (None if srow.get("prob_otm") is None
+                                    else round(float(srow["prob_otm"]) * 100.0, 1)),
         "Commitment_USD": round(srow["commitment"], 0),
         "Spread_Percent": _r(srow["spread_pct"], 0),
         "CumExposure_Percent": _r(srow["cum_pct_settled"], 0),
@@ -185,7 +196,7 @@ def scan(tickers: list[str], target_expiry: date, rules: Rules, sides: list[str]
          fetch_spot, fetch_expirations, fetch_chain, earnings_fn, delta_fn, xem_fn,
          contracts: int = 1, settled_cash: float = 0.0, alloc_limit: float | None = None,
          open_commitment: float = 0.0, r: float = 0.045, off_hours=None,
-         progress=None, today: date | None = None) -> dict:
+         progress=None, today: date | None = None, prob_fn=None) -> dict:
     """
     fetch_chain(ticker, expiry, side) -> list[dict]
     earnings_fn(ticker) -> (known, date|None)
@@ -247,6 +258,7 @@ def scan(tickers: list[str], target_expiry: date, rules: Rules, sides: list[str]
                     continue
                 srows = screen_chain(
                     t, sd, float(price), exp, chain, rules, delta_fn=delta_fn, xem_fn=xem_fn,
+                    prob_fn=prob_fn,
                     contracts=int(contracts), settled_cash=settled_cash, alloc_limit=alloc_limit,
                     open_commitment=open_commitment, earnings_date=ed, earnings_known=known,
                     r=r, today=today)
