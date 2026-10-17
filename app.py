@@ -15,6 +15,7 @@ import universe as uv
 from styles import CSS, html_table
 from rules import Rules, load_rules, save_rules
 from screener import scan, results_frame, summary_frame, tally_frame, export_excel, SHEET_COLUMNS
+from chain_preview import render_chain_preview
 
 st.set_page_config(page_title="סורק PUT / CALL", page_icon="🔎", layout="centered")
 
@@ -127,13 +128,15 @@ with st.container(border=True):
             st.success(f"נמצאו {shown} מניות." + (f" יסרקו הראשונות לפי סדר א-ב: {int(cap)}." if shown > cap else ""))
             uni_df = pd.DataFrame({"Ticker": [t for t, _ in uni], "Price": [p for _, p in uni]})
             d1, d2 = st.columns(2)
-            d1.download_button("⬇️ רשימת המניות ל-Excel", data=export_excel(uni_df, sheet_name="Tickers"),
+            d1.download_button("⬇️ רשימת מניות בלבד (Excel)", data=export_excel(uni_df, sheet_name="Tickers"),
                                file_name="stock_list.xlsx", key="uni_xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            d2.download_button("⬇️ CSV", data=uni_df.to_csv(index=False).encode("utf-8-sig"),
+            d2.download_button("⬇️ רשימת מניות בלבד (CSV)", data=uni_df.to_csv(index=False).encode("utf-8-sig"),
                                file_name="stock_list.csv", mime="text/csv", key="uni_csv")
             with st.expander("הרשימה"):
                 st.html(html_table(uni_df))
+            with st.expander("🔍 שרשרת אופציות של מניה אחת (Bid, Ask, Delta)"):
+                render_chain_preview(st, [t for t, _ in uni], target_expiry)
         else:
             st.warning("לא נמצאו מניות. הרחיבי את טווח המחיר או הוסיפי טיקרים ידנית.")
 
@@ -232,14 +235,19 @@ if out:
         out_df = df if extra else df[SHEET_COLUMNS]
         suffix = "_extended" if extra else ""
         c_a, c_b = st.columns(2)
-        c_a.download_button("⬇️ הורדה ל-Excel", data=export_excel(out_df),
+        c_a.download_button("⬇️ הטבלה המלאה ל-Excel", data=export_excel(out_df),
                             file_name=f"put_call_candidates{suffix}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             key="xlsx_btn", type="primary")
-        c_b.download_button("⬇️ CSV", data=out_df.to_csv(index=False).encode("utf-8-sig"),
+        c_b.download_button("⬇️ הטבלה המלאה CSV", data=out_df.to_csv(index=False).encode("utf-8-sig"),
                             file_name=f"put_call_candidates{suffix}.csv", mime="text/csv", key="csv_btn")
     else:
         st.info("אף חוזה לא עבר. אפשר לרופף כלל אחד ולהריץ שוב. הטבלה למטה מראה איזה כלל פוסל הכי הרבה.")
+        st.download_button("⬇️ הטבלה המלאה ל-Excel (כותרות בלבד, אין חוזים)",
+                           data=export_excel(pd.DataFrame(columns=SHEET_COLUMNS)),
+                           file_name="put_call_candidates_empty.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="xlsx_empty_btn")
 
     with st.expander("איזה כלל פוסל כמה חוזים"):
         tf = tally_frame(out["tally"])
