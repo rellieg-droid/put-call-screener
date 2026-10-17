@@ -17,7 +17,8 @@ from rules import Rules, load_rules, save_rules
 from screener import scan, results_frame, summary_frame, tally_frame, export_excel, SHEET_COLUMNS
 from screener import COLUMNS as ALL_COLUMNS
 from chain_preview import render_chain_preview
-from otm_tab import render_otm_tab
+from otm_tab import (render_otm_tab, render_send_to_otm, render_tab_jump,
+                     render_pick_stocks)
 
 st.set_page_config(page_title="סורק PUT / CALL", page_icon="🔎", layout="centered")
 
@@ -148,6 +149,8 @@ with tab_scan:
                     st.html(html_table(uni_df))
                 with st.expander("🔍 שרשרת אופציות של מניה אחת (Bid, Ask, Delta)"):
                     render_chain_preview(st, [t for t, _ in uni], target_expiry)
+                with st.expander("🔬 בחירת מניות לניתוח OTM (סימון בטבלה)"):
+                    render_pick_stocks(st, uni)
             else:
                 st.warning("לא נמצאו מניות. הרחיבי את טווח המחיר או הוסיפי טיקרים ידנית.")
 
@@ -253,6 +256,7 @@ with tab_scan:
                                 key="xlsx_btn", type="primary")
             c_b.download_button("⬇️ הטבלה המלאה CSV", data=out_df.to_csv(index=False).encode("utf-8-sig"),
                                 file_name=f"put_call_candidates{suffix}.csv", mime="text/csv", key="csv_btn")
+            render_send_to_otm(st, df)
         else:
             st.info("אף חוזה לא עבר. אפשר לרופף כלל אחד ולהריץ שוב. הטבלה למטה מראה איזה כלל פוסל הכי הרבה.")
             st.download_button("⬇️ הטבלה המלאה ל-Excel (כותרות בלבד, אין חוזים)",
@@ -279,3 +283,4 @@ with tab_scan:
 # ------------------------------------------------------------------ OTM probability tab
 with tab_otm:
     render_otm_tab([t for t, _ in (ss.get("universe") or [])], target_expiry)
+render_tab_jump(st)

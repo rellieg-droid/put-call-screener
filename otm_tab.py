@@ -340,13 +340,13 @@ def _render_stock_history(ticker: str, key_prefix: str) -> None:
 # טבלת השוואה לפי סטרייק (PUT). אין ציון ואין דירוג: שורה לכל סטרייק, ממוינת לפי סטרייק.
 # ההסתברויות מגיעות מ-options_engine (אותם מודלים כמו בטאב RiskShield).
 # ---------------------------------------------------------------------------
-OTM_COLUMNS = ["Ticker", "Type", "Strike", "Bid", "Ask", "PriceUsed", "Delta", "IV_Percent",
+OTM_COLUMNS = ["Ticker", "Type", "Strike", "Picked", "Bid", "Ask", "PriceUsed", "Delta", "IV_Percent",
                "OTM_Model_Percent", "OTM_FatTail_Percent", "OTM_Historical_Percent",
                "BreakEven", "Distance_Percent", "xEM", "OpenInterest", "Volume",
                "Spread_Percent", "DTE", "Expiration"]
 
 # מה שמוצג על המסך (נוח לטלפון). הקובץ המיוצא מכיל את כל OTM_COLUMNS.
-OTM_DISPLAY = ["Strike", "Bid", "Ask", "PriceUsed", "Delta", "OTM_Model_Percent", "OTM_FatTail_Percent",
+OTM_DISPLAY = ["Ticker", "Strike", "Picked", "Bid", "Ask", "PriceUsed", "Delta", "OTM_Model_Percent", "OTM_FatTail_Percent",
                "OTM_Historical_Percent", "BreakEven", "Distance_Percent", "xEM", "OpenInterest",
                "Spread_Percent"]
 
@@ -397,11 +397,12 @@ def _us_market_open_now(now=None):
 
 
 def build_strike_compare(ticker, price, expiry, chain, *, closes, delta_fn, engine, r=0.045,
-                         span=0.5, today=None):
+                         span=0.5, today=None, picked=None):
     """
     שורה לכל סטרייק PUT מתחת למחיר (עד span מתחתיו). ערך שאי אפשר לחשב נשאר ריק, לא מומצא.
     PriceUsed = Mid מציטוט חי בלבד (Bid ו-Ask חיים). בלי Last.
     engine = מודול options_engine. closes = רשימת סגירות יומית (או None).
+    picked = קבוצת סטרייקים שנבחרו בסורק (מסומנים ב-✓ בעמודה Picked).
     """
     import math
     import pandas as pd
@@ -455,7 +456,8 @@ def build_strike_compare(ticker, price, expiry, chain, *, closes, delta_fn, engi
                 be = k - mid
         spread = None if mid is None else (ask - bid) / mid * 100.0
         rows.append({
-            "Ticker": ticker, "Type": "PUT", "Strike": k, "Bid": bid, "Ask": ask, "PriceUsed": mid,
+            "Ticker": ticker, "Type": "PUT", "Strike": k,
+            "Picked": "✓" if (picked and k in picked) else "", "Bid": bid, "Ask": ask, "PriceUsed": mid,
             "Delta": _r1(delta, 3), "IV_Percent": _r1(None if not iv_ok else iv * 100.0, 2),
             "OTM_Model_Percent": _r1(None if model is None else model * 100.0),
             "OTM_FatTail_Percent": _r1(None if fat is None else fat * 100.0),
@@ -486,70 +488,201 @@ def _closes_10y(ticker: str):
     return full["Close"].iloc[-2520:].astype(float).tolist()
 
 
+MAX_TICKERS = 10
+
+
+def _parse_tickers(text):
+    out = []
+    for x in (text or "").replace(",", " ").split():
+        x = x.strip().upper()
+        if x and x not in out:
+            out.append(x)
+    return out
+
+
+def _send_to_otm(entries):
+    """callback של הכפתור בסורק. entries = [(ticker, strike, expiry)]. מכין את הטאב ומבקש טעינה אוטומטית."""
+    ss = st.session_state
+    picks, exps, tickers = {}, {}, []
+    for t, k, e in entries:
+        if t not in tickers:
+            tickers.append(t)
+        if k is not None:
+            picks.setdefault(t, set()).add(float(k))
+        if e:
+            exps.setdefault(t, e)
+    tickers = tickers[:MAX_TICKERS]
+    extra = list(ss.get("otm_extra", ["NVDA"]))
+    for t in tickers:
+        if t not in extra:
+            extra.append(t)
+    ss["otm_extra"] = extra
+    ss["otm_picks"] = picks
+    ss["otm_expiry"] = exps
+    ss["otm_tickers"] = tickers
+    ss["otm_autoload"] = True
+    ss["otm_jump"] = True
+
+
+def render_send_to_otm(st_mod, df) -> None:
+    """בסורק, מתחת לתוצאות: טבלה עם תיבות סימון (PUT בלבד) וכפתור שליחה לטאב הסתברות OTM."""
+    import pandas as pd
+    if df is None or df.empty or "Type" not in df.columns:
+        return
+    puts = df[df["Type"] == "PUT"].reset_index(drop=True)
+    if puts.empty:
+        st_mod.caption("ניתוח OTM זמין ל-PUT בלבד, ובתוצאות אין PUT.")
+        return
+    cols = [c for c in ["Ticker", "Strike", "Expiration", "Bid", "Ask", "Delta", "AnnualizedReturn_Percent",
+                        "OpenInterest"] if c in puts.columns]
+    view = puts[cols].copy()
+    view.insert(0, "בחרי", False)
+    st_mod.markdown("##### 🔬 נתחי לעומק")
+    st_mod.caption("מסמנים וי בעמודה הראשונה ולוחצים על הכפתור. אפשר לסמן כמה חוזים ומניות.")
+    edited = st_mod.data_editor(view, hide_index=True, use_container_width=True, key="deep_editor",
+                                disabled=cols, height=min(420, 40 + 35 * len(view)),
+                                column_config={"בחרי": st_mod.column_config.CheckboxColumn("בחרי", default=False)})
+    mask = edited["בחרי"].fillna(False).astype(bool)
+    chosen = puts[mask.values]
+
+    def _entries(frame):
+        return [(r["Ticker"], r["Strike"], str(r["Expiration"])[:10]) for _, r in frame.iterrows()]
+    sel_entries, all_entries = _entries(chosen), _entries(puts)
+    b1, b2 = st_mod.columns(2)
+    b1.button(f"🔬 נתחי את המסומנים ({len(sel_entries)})", key="deep_btn", disabled=not sel_entries,
+              on_click=lambda: _send_to_otm(sel_entries))
+    b2.button("🔬 נתחי את כל המניות בתוצאות", key="deep_all_btn", on_click=lambda: _send_to_otm(all_entries))
+    st_mod.caption(f"הניתוח נפתח בטאב 📊 הסתברות OTM (עד {MAX_TICKERS} מניות בבת אחת). "
+                   "אם הטאב לא נפתח לבד, לחצי עליו למעלה.")
+
+
+def render_pick_stocks(st_mod, uni) -> None:
+    """בשלב 1, מתחת לרשימת המניות: סימון מניות בטבלה ושליחה לטאב OTM (עובד גם כשהשוק סגור)."""
+    import pandas as pd
+    if not uni:
+        return
+    df = pd.DataFrame({"בחרי": False, "Ticker": [t for t, _ in uni], "Price": [p for _, p in uni]})
+    st_mod.caption("מסמנים וי ליד מניה ולוחצים על הכפתור. הניתוח נפתח בטאב 📊 הסתברות OTM, "
+                   "עם הפקיעה הקרובה לתאריך מסעיף 1 וכל הסטרייקים של ה-PUT.")
+    edited = st_mod.data_editor(df, hide_index=True, use_container_width=True, key="deep_stock_editor",
+                                disabled=["Ticker", "Price"], height=min(420, 40 + 35 * len(df)),
+                                column_config={"בחרי": st_mod.column_config.CheckboxColumn("בחרי", default=False)})
+    picked = edited[edited["בחרי"].fillna(False).astype(bool).values]
+    entries = [(r["Ticker"], None, None) for _, r in picked.iterrows()]
+    st_mod.button(f"🔬 נתחי את המסומנים בטאב OTM ({len(entries)})", key="deep_stock_btn",
+                  disabled=not entries, on_click=lambda: _send_to_otm(entries))
+    if len(entries) > MAX_TICKERS:
+        st_mod.caption(f"יישלחו {MAX_TICKERS} הראשונות מתוך {len(entries)} שסומנו.")
+
+
+def render_tab_jump(st_mod) -> None:
+    """ניסיון להעביר אוטומטית לטאב OTM אחרי לחיצה על 'נתחי לעומק'. אם הדפדפן חוסם, עוברים ידנית."""
+    if not st_mod.session_state.pop("otm_jump", False):
+        return
+    try:
+        import streamlit.components.v1 as components
+        components.html(
+            "<script>setTimeout(function(){try{var t=window.parent.document.querySelectorAll("
+            "'button[role=\"tab\"]');if(t.length>1){t[1].click();}}catch(e){}},300);</script>",
+            height=0)
+    except Exception:
+        pass  # המעבר האוטומטי הוא בונוס בלבד. אפשר ללחוץ על הטאב ידנית.
+
+
+def _load_one(dy, engine, ticker, target_expiry, picks, exps):
+    """טוען טיקר אחד ומחזיר dict עם df, או dict עם error."""
+    price = dy.fetch_spot(ticker)
+    exp = exps.get(ticker) or _nearest_expiry(dy.fetch_expirations(ticker), target_expiry)
+    if price is None or exp is None:
+        return {"error": "אין מחיר או תאריכי פקיעה."}
+    chain = dy.fetch_chain(ticker, exp, "PUT")
+    closes = _closes_10y(ticker)
+    df = build_strike_compare(ticker, float(price), exp, chain, closes=closes, delta_fn=dy.delta_fn,
+                              engine=engine, picked=picks.get(ticker))
+    return {"df": df, "expiry": exp, "price": float(price), "has_hist": closes is not None}
+
+
 def render_otm_tab(tickers, target_expiry) -> None:
-    """הטאב: בחירת מניה, טבלת השוואה לפי סטרייק עם הסתברויות OTM, גרף היסטוריה וטבלת סיכום."""
+    """הטאב: בחירת מניה אחת או כמה, טבלת השוואה לפי סטרייק עם הסתברויות OTM, גרף וטבלת סיכום."""
+    import pandas as pd
     import data_yf as dy
     import options_engine as engine
     from screener import export_excel
     from styles import html_table
 
     ss = st.session_state
-    st.caption("בוחרים מניה ורואים כל סטרייק של PUT עם הסתברות OTM משלושה מודלים, Breakeven ומרחק מהמחיר. "
+    ss.setdefault("otm_extra", ["NVDA"])
+    st.caption("בוחרים מניה אחת או כמה ורואים כל סטרייק של PUT עם הסתברות OTM משלושה מודלים, Breakeven ומרחק מהמחיר. "
                "הרשימה ממוינת לפי סטרייק. אין ציון, אין דירוג ואין המלצה: ההחלטה שלך. "
-               "הפקיעה שנבחרת היא הקרובה לתאריך שהגדרת בסעיף 1.")
-    c1, c2 = st.columns(2)
-    pick = c1.selectbox("מניה מהרשימה שנמצאה", ["(הקלדה ידנית)"] + list(tickers), key="otm_pick")
-    typed = c2.text_input("או טיקר ידנית", value="NVDA", key="otm_typed")
-    ticker = (typed if pick == "(הקלדה ידנית)" else pick).strip().upper()
+               "הפקיעה היא הקרובה לתאריך מסעיף 1, או הפקיעה של החוזה שנשלח מהסורק. "
+               "העמודה Picked מסמנת סטרייקים שנשלחו מהסורק.")
+    options = list(dict.fromkeys(list(tickers) + list(ss["otm_extra"])))
+    ss.setdefault("otm_tickers", [t for t in ["NVDA"] if t in options])
+    sel = st.multiselect(f"מניות לניתוח (עד {MAX_TICKERS})", options, key="otm_tickers")
+    typed = st.text_input("להוסיף טיקרים ידנית (רווח או פסיק)", value="", key="otm_typed")
     band_label = st.selectbox("טווח דלתא", list(DELTA_BANDS), key="otm_band",
                               help="מסנן את הסטרייקים לפי |Delta|. 'הכול' מציג את כל הסטרייקים בטווח 50% מתחת למחיר.")
-    if st.button("טעני ניתוח", key="otm_btn", type="primary"):
-        if not ticker:
-            ss["otm_data"] = {"error": "לא הוזן טיקר."}
+    clicked = st.button("טעני ניתוח", key="otm_btn", type="primary")
+    auto = ss.pop("otm_autoload", False)
+    if clicked or auto:
+        names = list(dict.fromkeys(list(sel) + _parse_tickers(typed)))[:MAX_TICKERS]
+        if not names:
+            ss["otm_data"] = {"error": "לא נבחרה מניה."}
         else:
-            try:
-                with st.spinner(f"טוענת {ticker}..."):
-                    price = dy.fetch_spot(ticker)
-                    exp = _nearest_expiry(dy.fetch_expirations(ticker), target_expiry)
-                    if price is None or exp is None:
-                        ss["otm_data"] = {"error": f"אין מחיר או תאריכי פקיעה עבור {ticker}."}
-                    else:
-                        chain = dy.fetch_chain(ticker, exp, "PUT")
-                        closes = _closes_10y(ticker)
-                        df = build_strike_compare(ticker, float(price), exp, chain, closes=closes,
-                                                  delta_fn=dy.delta_fn, engine=engine)
-                        ss["otm_data"] = {"df": df, "ticker": ticker, "expiry": exp, "price": float(price),
-                                          "has_hist": closes is not None}
-            except Exception as e:
-                ss["otm_data"] = {"error": f"{type(e).__name__}: {e}"}
+            picks, exps = ss.get("otm_picks", {}), ss.get("otm_expiry", {})
+            if clicked and not auto:
+                picks, exps = {}, {}     # טעינה ידנית חדשה: בלי סימוני Picked ישנים
+                ss["otm_picks"], ss["otm_expiry"] = {}, {}
+            res = {}
+            bar = st.progress(0.0, text="טוענת...")
+            for i, t in enumerate(names):
+                bar.progress(i / len(names), text=f"טוענת {t} ({i + 1}/{len(names)})")
+                try:
+                    res[t] = _load_one(dy, engine, t, target_expiry, picks, exps)
+                except Exception as e:
+                    res[t] = {"error": f"{type(e).__name__}: {e}"}
+            bar.empty()
+            ss["otm_data"] = {"frames": res}
     data = ss.get("otm_data")
     if not data:
-        st.info("בחרי מניה ולחצי 'טעני ניתוח'.")
+        st.info("בחרי מניה אחת או יותר ולחצי 'טעני ניתוח'.")
         return
     if data.get("error"):
         st.warning(data["error"])
         return
-    t, exp, price, df = data["ticker"], data["expiry"], data["price"], data["df"]
-    st.markdown(f"**{t}** | מחיר {price:,.2f} | פקיעה {exp}")
+    frames = data["frames"]
+    for t, f in frames.items():
+        if f.get("error"):
+            st.warning(f"{t}: {f['error']}")
+    good = {t: f for t, f in frames.items() if not f.get("error")}
+    if not good:
+        return
     if _us_market_open_now() is False:
         st.caption("השוק בארה״ב סגור. Bid, Ask, PriceUsed ו-Breakeven יהיו ריקים, וה-IV ממנו מחושבות הסתברויות "
                    "ה-OTM וה-Delta עשוי להיות ישן. כדאי להשוות שוב בשעות המסחר.")
-    if not data.get("has_hist"):
-        st.caption("אין היסטוריית מחירים לטיקר הזה, ולכן עמודות Fat-tail והיסטורי ריקות.")
-    view = filter_by_delta(df, DELTA_BANDS[band_label])
-    st.markdown(f"##### השוואה לפי סטרייק: {t}")
-    if view.empty:
-        st.info("אין סטרייקים בטווח הדלתא שנבחר. נסי 'הכול'.")
-    else:
-        st.html(html_table(view[OTM_DISPLAY]))
-        base = f"otm_{t}_PUT_{exp}"
+    band = DELTA_BANDS[band_label]
+    views = []
+    for t, f in good.items():
+        view = filter_by_delta(f["df"], band)
+        views.append(view)
+        st.markdown(f"##### {t} | מחיר {f['price']:,.2f} | פקיעה {f['expiry']}")
+        if not f.get("has_hist"):
+            st.caption(f"{t}: אין היסטוריית מחירים, ולכן עמודות Fat-tail והיסטורי ריקות.")
+        if view.empty:
+            st.info(f"{t}: אין סטרייקים בטווח הדלתא שנבחר. נסי 'הכול'.")
+        else:
+            st.html(html_table(view[OTM_DISPLAY]))
+    allv = pd.concat([v for v in views if not v.empty], ignore_index=True) if any(not v.empty for v in views) else None
+    if allv is not None:
+        base = "otm_" + "_".join(good)[:60] + "_PUT"
         d1, d2 = st.columns(2)
-        d1.download_button("⬇️ טבלת ההשוואה ל-Excel (כל העמודות)", data=export_excel(view, sheet_name="OTM"),
-                           file_name=f"{base}.xlsx", key="otm_xlsx",
+        d1.download_button(f"⬇️ כל המניות ל-Excel ({len(good)} מניות, כל העמודות)",
+                           data=export_excel(allv, sheet_name="OTM"), file_name=f"{base}.xlsx", key="otm_xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        d2.download_button("⬇️ CSV", data=view.to_csv(index=False).encode("utf-8-sig"),
+        d2.download_button("⬇️ CSV", data=allv.to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"{base}.csv", mime="text/csv", key="otm_csv")
     st.caption("OTM_Model = Black-Scholes לפי ה-IV של הסטרייק. OTM_FatTail = אותו חישוב עם זנבות שמנים מהתשואות ההיסטוריות. "
                "OTM_Historical = כמה פעמים בעבר המחיר נשאר מעל הסטרייק בטווח זמן דומה (ממוצע משוקלל 1/3/5/10 שנים). "
                "Breakeven = סטרייק פחות Mid. xEM = המרחק בתזוזות צפויות. אלה הערכות, לא הבטחה.")
-    _render_stock_history(t, "otm")
+    chart_t = st.selectbox("גרף והיסטוריה עבור", list(good), key="otm_chart_t")
+    _render_stock_history(chart_t, "otm")
