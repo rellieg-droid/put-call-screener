@@ -41,6 +41,37 @@ def us_market_open_now(now=None):
     return (9, 30) <= (n.hour, n.minute) < (16, 0)
 
 
+def _il_hours_for_next_session(now=None):
+    """(פתיחה, סגירה, האם היום) בשעון ישראל. 9:30-16:00 שעון ניו יורק, מומר לפי כללי שעון קיץ/חורף של שתי המדינות.
+    אחרי הסגירה או בסופ״ש מחזיר את יום המסחר הבא. בלי לוח חגים. None אם אין נתוני אזור זמן."""
+    try:
+        from datetime import time as _time
+        from zoneinfo import ZoneInfo
+        ny, il = ZoneInfo("America/New_York"), ZoneInfo("Asia/Jerusalem")
+        n = now.astimezone(ny) if now else datetime.now(ny)
+        d = n.date()
+        close_today = datetime.combine(d, _time(16, 0), tzinfo=ny)
+        while d.weekday() >= 5 or (d == n.date() and n >= close_today):
+            d += timedelta(days=1)
+        o = datetime.combine(d, _time(9, 30), tzinfo=ny).astimezone(il)
+        c = datetime.combine(d, _time(16, 0), tzinfo=ny).astimezone(il)
+        return o.strftime("%H:%M"), c.strftime("%H:%M"), d == n.date()
+    except Exception:
+        return None
+
+
+def market_hours_pill_text(now=None):
+    h = _il_hours_for_next_session(now)
+    if not h:
+        return "מסחר 9:30 עד 16:00 שעון ניו יורק"
+    return f"מסחר {h[0]} עד {h[1]} שעון ישראל" + ("" if h[2] else " (ביום המסחר הבא)")
+
+
+def market_hours_note(now=None):
+    h = _il_hours_for_next_session(now)
+    return f" ({h[0]} עד {h[1]} שעון ישראל)" if h else ""
+
+
 def otm_prob_fn(side, S, K, T, iv, r):
     """הסתברות OTM של מודל Black-Scholes מ-options_engine (אותו מודל כמו בטאב RiskShield)."""
     from options_engine import bs_greeks
@@ -60,7 +91,7 @@ elif _mkt is False:
     _pill = '<span class="pill closed"><span class="dot"></span>השוק בארה״ב סגור</span>'
 else:
     _pill = ""
-st.markdown(f'<div class="statusbar">{_pill}<span class="pill">מסחר 16:30 עד 23:00 שעון ישראל</span></div>',
+st.markdown(f'<div class="statusbar">{_pill}<span class="pill">{market_hours_pill_text()}</span></div>',
             unsafe_allow_html=True)
 st.caption("עובר על חוזי אופציה לפי הכללים שלך. אין ציון ואין דירוג: הרשימה ממוינת לפי טיקר, סוג וסטרייק, "
            "וההחלטה שלך. PUT = מכירה מכוסה במזומן. CALL = מכירה מכוסה במניות שכבר יש לך.")
@@ -189,7 +220,7 @@ with tab_scan:
 
     if us_market_open_now() is False:
         st.info("השוק בארה״ב סגור עכשיו. מחירי Bid/Ask עשויים להיות ישנים או חסרים, ולכן חוזים בלי מחיר חי ייפסלו. "
-                "כדאי לסרוק בשעות המסחר (16:30 עד 23:00 שעון ישראל).")
+                "כדאי לסרוק בשעות המסחר" + market_hours_note() + ".")
 
     # ------------------------------------------------------------------ run
     if st.button("🔎 סנני לפי הכללים שלי", type="primary", key="run_btn"):
