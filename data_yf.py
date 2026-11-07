@@ -125,6 +125,32 @@ def fetch_chain(ticker: str, expiry: str, side: str) -> list:
     return [] if not both else both.get(side.upper(), [])
 
 
+def hv_from_closes(closes, window: int = 30):
+    """תנודתיות היסטורית שנתית (עשרוני, 0.35 = 35%) מ-`window` תשואות לוגריתמיות אחרונות. None אם אין מספיק נתונים."""
+    import math
+    vals = [float(c) for c in closes if c is not None and c == c and float(c) > 0]
+    if len(vals) < window + 1:
+        return None
+    vals = vals[-(window + 1):]
+    rets = [math.log(vals[i] / vals[i - 1]) for i in range(1, len(vals))]
+    mean = sum(rets) / len(rets)
+    var = sum((x - mean) ** 2 for x in rets) / (len(rets) - 1)
+    return math.sqrt(var) * math.sqrt(252)
+
+
+def fetch_hv(ticker: str, window: int = 30):
+    """HV של `window` ימי מסחר אחרונים, או None. כישלון נרשם בלוג ולא עוצר סריקה."""
+    def _go():
+        try:
+            import yfinance as yf
+            h = yf.Ticker(ticker).history(period="6mo", interval="1d", auto_adjust=True)
+            return hv_from_closes(h["Close"].dropna().tolist(), window)
+        except Exception as e:
+            _log_error(f"{ticker} hv", e)
+            return None
+    return _cached(("hv", ticker, window), _go)
+
+
 def fetch_next_earnings(ticker: str):
     """(known, date|None). known=False אם אי אפשר לדעת (נכשל/אין נתון)."""
     def _go():
@@ -160,7 +186,7 @@ def fetch_next_earnings(ticker: str):
 
 
 def prewarm(tickers: list[str], target_expiry: date, sides: list[str], want_earnings: bool,
-            workers: int = 4, progress=None) -> None:
+            workers: int = 4, progress=None, want_hv: bool = True) -> None:
     """טוען במקביל מחיר, פקיעות ושרשראות למטמון, כדי שהסריקה עצמה תהיה מהירה."""
     from screener import nearest_expiry
 
@@ -173,6 +199,8 @@ def prewarm(tickers: list[str], target_expiry: date, sides: list[str], want_earn
             _fetch_both(t, exp)
         if want_earnings:
             fetch_next_earnings(t)
+        if want_hv:
+            fetch_hv(t)
 
     done = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:

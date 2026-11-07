@@ -33,7 +33,7 @@ SHEET_COLUMNS = [
 # עמודות נוספות, אופציונליות, אחרי עמודות הגיליון
 EXTRA_COLUMNS = [
     "Distance_Percent", "xEM", "BreakEven", "OTM_Probability_Percent", "Commitment_USD",
-    "Spread_Percent",
+    "Spread_Percent", "HV30_Percent", "IV_HV_Ratio",
     "CumExposure_Percent", "NotChecked",
 ]
 COLUMNS = SHEET_COLUMNS + EXTRA_COLUMNS
@@ -67,7 +67,7 @@ def screen_chain(ticker: str, side: str, price: float, expiry: str, chain: list,
                  alloc_limit: float | None = None, open_commitment: float = 0.0,
                  earnings_date: date | None = None, earnings_known: bool = False,
                  r: float = 0.045, today: date | None = None, span: float = 0.5,
-                 prob_fn=None) -> list[dict]:
+                 prob_fn=None, hv=None) -> list[dict]:
     """
     כל חוזה OTM בטווח (PUT: [(1-span)*price, price]; CALL: [price, (1+span)*price])
     -> שורה עם נתונים גולמיים + תוצאת כל כלל.
@@ -80,6 +80,7 @@ def screen_chain(ticker: str, side: str, price: float, expiry: str, chain: list,
     dte = max(1, (exp_d - today).days)
     T = dte / 365.0
     sigma = atm_iv(chain, price)
+    iv_hv = (sigma / hv) if (sigma and hv and hv > 0) else None
     if earnings_known:
         e_flag = bool(earnings_date is not None and today <= earnings_date <= exp_d)
     else:
@@ -127,6 +128,7 @@ def screen_chain(ticker: str, side: str, price: float, expiry: str, chain: list,
             "delta_abs": None if delta is None else abs(float(delta)),
             "delta_signed": None if delta is None else float(delta),
             "xem": None if xem is None else float(xem),
+            "hv": hv, "iv_hv": iv_hv,
             "prob_otm": None if prob is None else float(prob),
             "mid": mid,
             "spread_pct": None if mid is None else (c["ask"] - c["bid"]) / mid * 100.0,
@@ -187,6 +189,8 @@ def contract_row(srow: dict, chain_by_strike: dict, r: float, off_hours) -> dict
                                     else round(float(srow["prob_otm"]) * 100.0, 1)),
         "Commitment_USD": round(srow["commitment"], 0),
         "Spread_Percent": _r(srow["spread_pct"], 0),
+        "HV30_Percent": None if srow.get("hv") is None else round(float(srow["hv"]) * 100.0, 1),
+        "IV_HV_Ratio": _r(srow.get("iv_hv"), 2),
         "CumExposure_Percent": _r(srow["cum_pct_settled"], 0),
         "NotChecked": ", ".join(srow["unknown"]) if srow["unknown"] else "",
     }
@@ -196,7 +200,7 @@ def scan(tickers: list[str], target_expiry: date, rules: Rules, sides: list[str]
          fetch_spot, fetch_expirations, fetch_chain, earnings_fn, delta_fn, xem_fn,
          contracts: int = 1, settled_cash: float = 0.0, alloc_limit: float | None = None,
          open_commitment: float = 0.0, r: float = 0.045, off_hours=None,
-         progress=None, today: date | None = None, prob_fn=None) -> dict:
+         progress=None, today: date | None = None, prob_fn=None, hv_fn=None) -> dict:
     """
     fetch_chain(ticker, expiry, side) -> list[dict]
     earnings_fn(ticker) -> (known, date|None)
@@ -248,6 +252,12 @@ def scan(tickers: list[str], target_expiry: date, rules: Rules, sides: list[str]
                 known, ed = earnings_fn(t)
             except Exception:
                 known, ed = (False, None)
+        hv = None
+        if hv_fn is not None:
+            try:
+                hv = hv_fn(t)
+            except Exception:
+                hv = None
         for sd in sides:
             entry = {"ticker": t, "side": sd, "expiry": exp, "checked": 0, "passed": 0, "note": ""}
             summary.append(entry)
@@ -258,7 +268,7 @@ def scan(tickers: list[str], target_expiry: date, rules: Rules, sides: list[str]
                     continue
                 srows = screen_chain(
                     t, sd, float(price), exp, chain, rules, delta_fn=delta_fn, xem_fn=xem_fn,
-                    prob_fn=prob_fn,
+                    prob_fn=prob_fn, hv=hv,
                     contracts=int(contracts), settled_cash=settled_cash, alloc_limit=alloc_limit,
                     open_commitment=open_commitment, earnings_date=ed, earnings_known=known,
                     r=r, today=today)
