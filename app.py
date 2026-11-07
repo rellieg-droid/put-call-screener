@@ -36,28 +36,30 @@ def us_market_open_now(now=None):
         n = now or datetime.now(ZoneInfo("America/New_York"))
     except Exception:
         return None
-    if n.weekday() >= 5:
-        return False
-    return (9, 30) <= (n.hour, n.minute) < (16, 0)
+    from market_calendar import us_market_open
+    return us_market_open(n)
 
 
 def _il_hours_for_next_session(now=None):
     """(פתיחה, סגירה, האם היום) בשעון ישראל. 9:30-16:00 שעון ניו יורק, מומר לפי כללי שעון קיץ/חורף של שתי המדינות.
     אחרי הסגירה או בסופ״ש מחזיר את יום המסחר הבא. בלי לוח חגים. None אם אין נתוני אזור זמן."""
     try:
-        from datetime import time as _time
         from zoneinfo import ZoneInfo
-        ny, il = ZoneInfo("America/New_York"), ZoneInfo("Asia/Jerusalem")
-        n = now.astimezone(ny) if now else datetime.now(ny)
-        d = n.date()
-        close_today = datetime.combine(d, _time(16, 0), tzinfo=ny)
-        while d.weekday() >= 5 or (d == n.date() and n >= close_today):
-            d += timedelta(days=1)
-        o = datetime.combine(d, _time(9, 30), tzinfo=ny).astimezone(il)
-        c = datetime.combine(d, _time(16, 0), tzinfo=ny).astimezone(il)
-        return o.strftime("%H:%M"), c.strftime("%H:%M"), d == n.date()
+        from market_calendar import next_session
+        il = ZoneInfo("Asia/Jerusalem")
+        o, c, today = next_session(now)
+        return o.astimezone(il).strftime("%H:%M"), c.astimezone(il).strftime("%H:%M"), today
     except Exception:
         return None
+
+
+def _il_now():
+    """השעה עכשיו בישראל (השרת בענן עובד ב-UTC)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Jerusalem"))
+    except Exception:
+        return datetime.now()
 
 
 def market_hours_pill_text(now=None):
@@ -204,6 +206,8 @@ with tab_scan:
         moi = a.number_input("Open Interest מינימום", 0, 1_000_000, int(r0.min_open_interest), 10, key="moi")
         mxem = b.number_input("xEM מינימום", 0.0, 10.0, float(r0.min_xem), 0.25, key="mxem",
                               help="כמה תזוזות צפויות הסטרייק רחוק מהמחיר. 0 = כבוי.")
+        mivhv = st.number_input("IV מול HV מינימום (יחס)", 0.0, 10.0, float(r0.min_iv_hv_ratio), 0.05, key="mivhv", format="%.2f",
+                                help="IV של האופציות חלקי התנודתיות ההיסטורית של 30 יום. 1.20 = הפרמיה יקרה ב-20% מהתנועה בפועל. 0 = כבוי.")
         chk_e = st.checkbox("לפסול אם יש דוח רווחים לפני הפקיעה", value=bool(r0.check_earnings), key="chk_e")
         chk_x = st.checkbox("PUT: לפסול אם החשיפה המצטברת חורגת מהגבול בחשבון", value=bool(r0.check_exposure), key="chk_x")
 
@@ -216,7 +220,8 @@ with tab_scan:
             st.caption("הערכים האלה לא נשמרים בין ביקורים באפליקציה. הזיני אותם מחדש כשצריך.")
 
     rules = Rules(delta_min=dmin, delta_max=dmax, min_premium=mprem, min_xem=mxem, min_annual_yield_pct=myield,
-                  max_spread_pct=mspread, min_open_interest=int(moi), check_earnings=chk_e, check_exposure=chk_x)
+                  max_spread_pct=mspread, min_open_interest=int(moi), check_earnings=chk_e, check_exposure=chk_x,
+                  min_iv_hv_ratio=mivhv)
 
     if us_market_open_now() is False:
         st.info("השוק בארה״ב סגור עכשיו. מחירי Bid/Ask עשויים להיות ישנים או חסרים, ולכן חוזים בלי מחיר חי ייפסלו. "
@@ -239,13 +244,13 @@ with tab_scan:
                 tick, target_expiry, rules, sides,
                 fetch_spot=dy.fetch_spot, fetch_expirations=dy.fetch_expirations, fetch_chain=dy.fetch_chain,
                 earnings_fn=dy.fetch_next_earnings, delta_fn=dy.delta_fn, xem_fn=dy.xem_fn,
-                prob_fn=otm_prob_fn,
+                prob_fn=otm_prob_fn, hv_fn=dy.fetch_hv,
                 contracts=int(contracts), settled_cash=float(settled),
                 alloc_limit=float(alloc) or None, open_commitment=float(open_commit),
                 off_hours=None if market is None else (not market))
             bar.empty()
             ss["scan_out"] = out
-            ss["scan_meta"] = {"n": len(tick), "sides": sides, "when": datetime.now().strftime("%H:%M")}
+            ss["scan_meta"] = {"n": len(tick), "sides": sides, "when": _il_now().strftime("%H:%M")}
 
     # ------------------------------------------------------------------ results
     out = ss.get("scan_out")

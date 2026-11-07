@@ -391,9 +391,8 @@ def _us_market_open_now(now=None):
         n = now or datetime.now(ZoneInfo("America/New_York"))
     except Exception:
         return None
-    if n.weekday() >= 5:
-        return False
-    return (9, 30) <= (n.hour, n.minute) < (16, 0)
+    from market_calendar import us_market_open
+    return us_market_open(n)
 
 
 def build_strike_compare(ticker, price, expiry, chain, *, closes, delta_fn, engine, r=0.045,

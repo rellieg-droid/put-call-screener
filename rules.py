@@ -30,6 +30,7 @@ class Rules:
     min_open_interest: int = 50         # Open Interest מינימלי (0 = כבוי)
     check_earnings: bool = True         # לפסול אם יש דוח רווחים עד הפקיעה
     check_exposure: bool = True         # PUT בלבד: לפסול אם החשיפה חורגת מהגבול
+    min_iv_hv_ratio: float = 0.0        # IV חלקי HV(30 יום) מינימלי (0 = כבוי)
 
 
 def load_rules(path: str = RULES_FILE) -> Rules:
@@ -103,6 +104,11 @@ def evaluate_strike(row: dict, rules: Rules) -> dict:
             out["מרווח"] = (UNKNOWN, "אין מרווח") if s is None else (
                 (PASS, "") if s <= rules.max_spread_pct else
                 (FAIL, f"מרווח {s:.0f}% מעל {rules.max_spread_pct:g}%"))
+    if rules.min_iv_hv_ratio > 0:
+        q = row.get("iv_hv")
+        out["IV/HV"] = (UNKNOWN, "אין IV או HV") if q is None else (
+            (PASS, "") if q >= rules.min_iv_hv_ratio else
+            (FAIL, f"IV/HV {q:.2f} נמוך מ-{rules.min_iv_hv_ratio:g}"))
     if rules.min_open_interest > 0:
         oi = row.get("open_interest")
         out["Open Interest"] = (UNKNOWN, "אין OI") if oi is None else (
@@ -130,4 +136,5 @@ RULE_EXPLAIN = {
     "Open Interest": "מעט חוזים פתוחים בסטרייק, כלומר נזילות נמוכה.",
     "דוחות": "דוח הרווחים הבא של החברה נופל לפני הפקיעה.",
     "חשיפה": "החוזה הזה, יחד עם ה-PUT הפתוחים שהזנת, חורג מהגבול שהגדרת לחשבון.",
+    "IV/HV": "הפרמיה לא יקרה מספיק ביחס לתנודתיות שהמניה הציגה ב-30 הימים האחרונים.",
 }
