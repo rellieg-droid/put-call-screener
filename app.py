@@ -17,6 +17,9 @@ from rules import Rules, load_rules, save_rules
 from screener import scan, results_frame, summary_frame, tally_frame, export_excel, SHEET_COLUMNS
 from screener import COLUMNS as ALL_COLUMNS
 from chain_preview import render_chain_preview
+from otm_tab import _send_to_otm
+from deep_tab import render_deep_tab, render_deep_pick, render_deep_jump
+from tracker_tab import render_tracker_tab
 from otm_tab import (render_otm_tab, render_send_to_otm, render_tab_jump,
                      render_pick_stocks)
 
@@ -98,7 +101,8 @@ st.markdown(f'<div class="statusbar">{_pill}<span class="pill">{market_hours_pil
 st.caption("עובר על חוזי אופציה לפי הכללים שלך. אין ציון ואין דירוג: הרשימה ממוינת לפי טיקר, סוג וסטרייק, "
            "וההחלטה שלך. PUT = מכירה מכוסה במזומן. CALL = מכירה מכוסה במניות שכבר יש לך.")
 
-tab_scan, tab_otm = st.tabs(["🔎 סורק", "📊 הסתברות OTM"])
+tab_scan, tab_otm, tab_deep, tab_track = st.tabs(
+    ["🔎 סורק", "📊 הסתברות OTM", "🔬 ניתוח מעמיק", "📌 המעקב שלי"])
 
 with tab_scan:
     # ------------------------------------------------------------------ connection test
@@ -131,6 +135,18 @@ with tab_scan:
         idx = st.multiselect("מדד", list(uv.INDEX_SOURCES.keys()), default=["S&P 500"], key="idx_sel")
         manual = st.text_area("או טיקרים ידנית (מופרדים ברווח או פסיק)", "", key="manual_t", height=70,
                               help="אם תכתבי כאן טיקרים ותבחרי גם מדד, הרשימות מתאחדות.")
+        def _typed_tickers():
+            raw = str(ss.get("manual_t", "")).replace(",", " ").split()
+            return [t for t in (uv.normalize_ticker(x) for x in raw) if t]
+
+        def _send_typed():
+            tk = _typed_tickers()
+            if tk:
+                _send_to_otm([(t, None, None) for t in tk])
+
+        st.button(f"📊 נתחי את הטיקרים שהקלדתי ({len(_typed_tickers())})", key="manual_analyze_btn",
+                  on_click=_send_typed,
+                  help="שולח את הטיקרים שבתיבה ישר ללשונית הסתברות OTM. אחרי ההקלדה לחצי Ctrl+Enter או לחצי מחוץ לתיבה.")
         p1, p2, p3 = st.columns(3)
         pmin = p1.number_input("מחיר מינימום", 0.0, 10000.0, 5.0, 5.0, key="pmin")
         pmax = p2.number_input("מחיר מקסימום", 0.0, 10000.0, 150.0, 10.0, key="pmax")
@@ -293,6 +309,7 @@ with tab_scan:
             c_b.download_button("⬇️ הטבלה המלאה CSV", data=out_df.to_csv(index=False).encode("utf-8-sig"),
                                 file_name=f"put_call_candidates{suffix}.csv", mime="text/csv", key="csv_btn")
             render_send_to_otm(st, df)
+            render_deep_pick(st, df)
         else:
             st.info("אף חוזה לא עבר. אפשר לרופף כלל אחד ולהריץ שוב. הטבלה למטה מראה איזה כלל פוסל הכי הרבה.")
             st.download_button("⬇️ הטבלה המלאה ל-Excel (כותרות בלבד, אין חוזים)",
@@ -319,4 +336,34 @@ with tab_scan:
 # ------------------------------------------------------------------ OTM probability tab
 with tab_otm:
     render_otm_tab([t for t, _ in (ss.get("universe") or [])], target_expiry)
+    _otm_ok = [t for t, f in ((ss.get("otm_data") or {}).get("frames") or {}).items() if not f.get("error")]
+    if _otm_ok:
+        with st.container(border=True):
+            _c1, _c2 = st.columns([3, 2])
+            _pick_t = _c1.selectbox("מניה לניתוח מעמיק", _otm_ok, key="otm_to_deep_t")
+
+            def _go_deep():
+                st.session_state["deep_ticker"] = st.session_state.get("otm_to_deep_t")
+                st.session_state.pop("deep_contract", None)
+                st.session_state["deep_jump"] = True
+            _c2.button("🔬 עברי לניתוח מעמיק", key="otm_to_deep_btn", type="primary", on_click=_go_deep)
 render_tab_jump(st)
+
+
+# ------------------------------------------------------------------ deep analysis tab
+with tab_deep:
+    import options_engine as _oe
+    import otm_tab as _ot
+    from screener import atm_iv as _atm_iv
+    render_deep_tab(
+        st, dy, _oe, load_rules, _ot._render_stock_history, _ot._closes_10y,
+        lambda tk, s_, ex, d_, ch, cl: _ot.build_strike_compare(
+            tk, s_, ex, ch, closes=cl, delta_fn=dy.delta_fn, engine=_oe),
+        _atm_iv, html_table)
+render_deep_jump(st)
+
+
+# ------------------------------------------------------------------ tracker tab
+with tab_track:
+    import otm_tab as _ot2
+    render_tracker_tab(st, dy, _ot2._try_fetch_price_history, html_table)

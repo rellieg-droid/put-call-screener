@@ -4,3 +4,4 @@ screener_rules.json
 universe_cache.json
 .pytest_cache/
 *.bak
+tracking.json
